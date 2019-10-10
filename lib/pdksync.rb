@@ -12,6 +12,7 @@ require 'colorize'
 require 'bundler'
 require 'octokit'
 require 'pry'
+require 'pdk/cli/util/interview'
 
 # @summary
 #   This module set's out and controls the pdksync process
@@ -132,7 +133,8 @@ module PdkSync
       if steps.include?(:gem_file_update)
         Dir.chdir(main_path) unless Dir.pwd == main_path
         print 'gem file update, '
-        gem_file_update(output_path, module_args[:gem_to_test], module_args[:gem_line], module_args[:gem_sha_finder], module_args[:gem_sha_replacer], module_args[:gem_version_finder], module_args[:gem_version_replacer], module_args[:gem_branch_finder], module_args[:gem_branch_replacer]) # rubocop:disable Metrics/LineLength
+        gem_file_update(output_path, module_args[:gem_to_test], module_args[:gem_line], module_args[:gem_sha_finder], module_args[:gem_sha_replacer],
+                        module_args[:gem_version_finder], module_args[:gem_version_replacer], module_args[:gem_branch_finder], module_args[:gem_branch_replacer])
         print 'gem file updated, '
       end
       if steps.include?(:run_tests)
@@ -296,9 +298,7 @@ module PdkSync
 
   def self.create_commit(git_repo, branch_name, commit_message)
     checkout_branch(git_repo, branch_name)
-    if add_staged_files(git_repo) # ignore rubocop for clarity on side effect ordering # rubocop:disable Style/GuardClause
-      commit_staged_files(git_repo, branch_name, commit_message)
-    end
+    commit_staged_files(git_repo, branch_name, commit_message) if add_staged_files(git_repo)
   end
 
   # @summary
@@ -349,9 +349,6 @@ module PdkSync
     else
       stdout, stderr, status = Open3.capture3(command)
     end
-
-    puts "\n#{stdout}\n".yellow
-    puts "(FAILURE) Unable to run command '#{command}': #{stderr}".red unless status.exitstatus.zero?
     status.exitstatus
   end
 
@@ -366,18 +363,16 @@ module PdkSync
   def self.get_source_test_gem(gem_to_test, gem_line)
     if !gem_line.nil?
       new_data = gem_line.split(',')
-      return new_data # rubocop:disable Style/RedundantReturn
+      new_data
     elsif !gem_to_test.nil?
       file = File.open('Gemfile')
       file.each_line do |line|
-        if line.include?(gem_to_test.to_s)
-          if line =~ %r{(http|https|ftp|ftps)\:\/\/[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,3}(\/\S*)?} # rubocop:disable Style/GuardClause
-            return line.split(',')[1].strip.to_s
-            break # rubocop:disable Lint/UnreachableCode
-          else
-            return "https://github.com/puppetlabs/#{gem_to_test}"
-          end
-        end
+        next unless line.include?(gem_to_test.to_s)
+        return line.split(',')[1].strip.to_s if line =~ %r{(http|https|ftp|ftps)\:\/\/[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,3}(\/\S*)?}
+        # return line.split(',')[1].strip.to_s
+        # else
+        return "https://github.com/puppetlabs/#{gem_to_test}"
+        # end
       end
     end
   end
@@ -566,7 +561,7 @@ module PdkSync
     end
 
     # gem_sha_finder and gem_sha_replacer options are passed
-    if gem_sha_finder.nil? == false && gem_sha_replacer.nil? == false && gem_sha_finder != '' && gem_sha_finder != '\"\"' && gem_sha_replacer != '' && gem_sha_replacer != '\"\"' # rubocop:disable Metrics/LineLength
+    if gem_sha_finder.nil? == false && gem_sha_replacer.nil? == false && gem_sha_finder != '' && gem_sha_finder != '\"\"' && gem_sha_replacer != '' && gem_sha_replacer != '\"\"'
       # Replace with SHA
       file = File.open(gem_file_name)
       contents = file.readlines.join
@@ -577,7 +572,8 @@ module PdkSync
     end
 
     # gem_version_finder and gem_version_replacer options are passed
-    if gem_version_finder.nil? == false && gem_version_replacer.nil? == false && gem_version_finder != '' && gem_version_finder != '\"\"' && gem_version_replacer != '' && gem_version_replacer != '\"\"' # rubocop:disable Metrics/LineLength
+    if gem_version_finder.nil? == false && gem_version_replacer.nil? == false && gem_version_finder != '' && gem_version_finder != '\"\"' &&
+       gem_version_replacer != '' && gem_version_replacer != '\"\"'
       # Replace with version
       file = File.open(gem_file_name)
       contents = file.readlines.join
@@ -588,7 +584,8 @@ module PdkSync
     end
 
     # gem_branch_finder and gem_branch_replacer options are passed
-    if gem_branch_finder.nil? == false && gem_branch_replacer.nil? == false && gem_branch_finder != '' && gem_branch_finder != '\"\"' && gem_branch_replacer != '' && gem_branch_replacer != '\"\"' # rubocop:disable Metrics/LineLength, Style/GuardClause
+    if gem_branch_finder.nil? == false && gem_branch_replacer.nil? == false && gem_branch_finder != '' && gem_branch_finder != '\"\"' &&
+       gem_branch_replacer != '' && gem_branch_replacer != '\"\"'
       # Replace with branch
       file = File.open(gem_file_name)
       contents = file.readlines.join
@@ -622,7 +619,38 @@ module PdkSync
     if module_type == 'litmus'
       [litmus_install, litmus_provision, litmus_agent, litmus_module, litmus_tests, litmus_teardown].each do |test_execute|
         Dir.chdir(old_path)
-        run_command(output_path, test_execute.to_s)
+        Bundler.with_clean_env do
+          Dir.chdir(output_path) unless Dir.pwd == output_path
+          # stdout = ''
+          # _stderr = ''
+          # _status = ''
+          stdout, _stderr, _status = Open3.capture3(test_execute.to_s)
+          if test_execute == litmus_tests
+            # stdout, _stderr, _status = Open3.capture3(test_execute.to_s)
+            if !stdout.nil? && stdout.include?('Failed')
+              questions = []
+              questions << {
+                name:     'detailed_report',
+                question: _('Do you want to enable detailed test report ?'),
+                type:     :yes
+              }
+              prompt = TTY::Prompt.new(help_color: :cyan)
+              interview = PDK::CLI::Util::Interview.new(prompt)
+              interview.add_questions(questions)
+              answers = interview.run
+
+              # rubocop:disable Metrics/BlockNesting
+              if !answers['detailed_report'].nil? && answers['detailed_report'].casecmp('yes').zero?
+                puts stdout
+              else
+                puts "Failed examples #{stdout.split('Failed examples')[1]}"
+                puts 'Failed to connect to the test vm: getaddrinfo: nodename nor servname provided, or not known' if stdout.include?('An error occurred')
+              end
+            end
+          end
+          puts stdout
+          puts stdout.match(%r{\Finished\s\S+\s\d+(\s\S+\s\d+\D\d+\s\S+|\D\d+\s\S+)}).to_s.green
+        end
       end
     end
 
