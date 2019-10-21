@@ -13,6 +13,7 @@ require 'bundler'
 require 'octokit'
 require 'pry'
 require 'pdk/cli/util/interview'
+require 'HTTParty'
 
 # @summary
 #   This module set's out and controls the pdksync process
@@ -140,6 +141,7 @@ module PdkSync
       if steps.include?(:run_tests)
         Dir.chdir(main_path) unless Dir.pwd == main_path
         print 'run tests, '
+        puts output_path.to_s
         run_tests(output_path, module_args[:module_type])
       end
       if steps.include?(:pdk_update)
@@ -596,6 +598,37 @@ module PdkSync
     end
   end
 
+  # convert miliseconds in format hours_min_sec
+  def self.get_duration_hrs_and_mins(milliseconds)
+    return '' unless milliseconds
+    hours, milliseconds   = milliseconds.divmod(1000 * 60 * 60)
+    minutes, milliseconds = milliseconds.divmod(1000 * 60)
+    seconds, milliseconds = milliseconds.divmod(1000)
+    "#{hours}h #{minutes}m #{seconds}s #{milliseconds}ms"
+  end
+
+  def self.analyse_logs(last_build_job_data, build)
+    return 'No logs' unless last_build_job_data
+
+    if last_build_job_data['result'].casecmp?('success')
+      duration = last_build_job_data['duration'].to_i
+      return duration
+    elsif last_build_job_data['result'].casecmp?('failure')
+      @failed = true
+      # last_build_console = "#{build}lastBuild/consoleText"
+      # last_build_logs = HTTParty.get(last_build_console).parsed_response
+      # failed_full_log="Failures: #{last_build_logs.split("Failures")[1]}"
+      # failed_sumarized_log="Failed examples: #{last_build_logs.split("Failures")[1]}"
+      duration = last_build_job_data['duration'].to_i
+      time = get_duration_hrs_and_mins(duration)
+      puts "Status: #{last_build_job_data['result']}".red
+      # puts failed_sumarized_log
+      puts "Check full log on: #{build}lastBuild".red
+      puts "Execution time: #{time}".red
+      return duration
+    end
+  end
+
   # @summary
   #   This method when called will run the 'module tests' command at the given location, with an error message being thrown if it is not successful.
   # @param [String] output_path
@@ -607,7 +640,7 @@ module PdkSync
   def self.run_tests(output_path, module_type)
     # Runs the module tests command
     litmus_install   = 'bundle install --path .bundle/gems/ --jobs 4'
-    litmus_provision = 'bundle exec rake \'litmus:provision_list[release_checks]\''
+    litmus_provision = 'bundle exec rake \'litmus:provision[vmpooler, debian-9-x86_64]\''
     litmus_agent     = 'bundle exec rake litmus:install_agent'
     litmus_module    = 'bundle exec rake litmus:install_module'
     litmus_tests     = 'bundle exec rake litmus:acceptance:parallel'
@@ -618,6 +651,7 @@ module PdkSync
     # Run the tests
     if module_type == 'litmus'
       [litmus_install, litmus_provision, litmus_agent, litmus_module, litmus_tests, litmus_teardown].each do |test_execute|
+        # [litmus_tests].each do |test_execute|
         Dir.chdir(old_path)
         Bundler.with_clean_env do
           Dir.chdir(output_path) unless Dir.pwd == output_path
@@ -652,9 +686,82 @@ module PdkSync
           puts stdout.match(%r{\Finished\s\S+\s\d+(\s\S+\s\d+\D\d+\s\S+|\D\d+\s\S+)}).to_s.green
         end
       end
-    end
+    elsif module_type == 'traditional'
+      tested_module = output_path.split('/')[1].split('-')[1].to_s
+      traditional_module_list = {
+        'docker' => 'cross-platform',
+        'java_ks' => 'cross-platform',
+        'bolt_proxy' => 'linux',
+        'helm' => 'linux',
+        'ibm-installation-manager' => 'linux',
+        'kubernetes' => 'linux',
+        'satellite-pe-tools' => 'linux',
+        'vcsrepo' => 'linux',
+        'vsphere' => 'linux',
+        'websphere_application_server' => 'linux',
+        'iis' => 'windows',
+        'powershell' => 'windows',
+        'reboot' => 'windows',
+        'registry' => 'windows',
+        'sqlserver' => 'windows'
+      }
 
-    if module_type == 'traditional'
+      traditional_module_list.each do |key, value|
+        @platform = value if key == tested_module
+      end
+
+      ad_hoc_view_url = "https://jenkins-platform.delivery.puppetlabs.net/view/modules/view/#{@platform}/view/_adhoc/view/#{tested_module}/api/json"
+      ad_hoc_view_data = HTTParty.get(ad_hoc_view_url).parsed_response
+
+      puts '-' * 100
+      puts "GEtting results for #{tested_module}"
+      puts "NOT FOUND #{ad_hoc_view_url}" if ad_hoc_view_data.include?('HTTP ERROR 404')
+
+      ad_hoc_build = []
+
+      # get_ad_hoc_builds
+      ad_hoc_view_data['jobs'].each do |build|
+        ad_hoc_build.push(build['url'])
+      end
+
+      # check status build, check if skipped, check multiple build, check status, check duration, get failing text
+      ad_hoc_build.each do |build|
+        total_time = 0
+        @failed = false
+
+        # if skipped go to next build
+        next if build.include?('skippable_adhoc')
+        build_job = "#{build}api/json"
+        build_job_data = HTTParty.get(build_job).parsed_response
+        next if build_job_data['displayNameOrNull'].include?('Skipped')
+        platforms_list = []
+        # if disabled next to the next build
+        next unless build_job_data['buildable']
+        # puts "Job not built: #{build}" if build_job_data["color"]=='notbuilt'
+        next if build_job_data['color'] == 'notbuilt'
+
+        # if single build
+        if build_job_data['activeConfigurations'].nil?
+          last_build_data = "#{build}lastBuild/api/json"
+          last_build_job_data = HTTParty.get(last_build_data).parsed_response
+          total_time += analyse_logs(last_build_job_data, build).to_i
+        else
+          # if multiple platforms (multiple builds)
+          build_job_data['activeConfigurations'].each do |url_child|
+            next if url_child['color'] == 'notbuilt'
+            platforms_list.push(url_child['url'])
+          end
+
+          platforms_list.each do |platform_build|
+            platform_last_build_data = "#{platform_build}lastBuild/api/json"
+            platform_last_build_job_data = HTTParty.get(platform_last_build_data).parsed_response
+            total_time += analyse_logs(platform_last_build_job_data, platform_build).to_i
+          end
+        end
+        puts "Execution of #{build} is DONE!" unless platforms_list.size.eql?(0) && build.include?('skippable_adhoc')
+        puts 'Status: SUCCESS'.green if @failed == false
+        puts "Execution time: #{get_duration_hrs_and_mins(total_time)}"
+      end
     end
   end
 

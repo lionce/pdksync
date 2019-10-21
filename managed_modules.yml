@@ -18,9 +18,9 @@
 #- puppetlabs-helm
 #- puppetlabs-ibm_installation_manager
 #- puppetlabs-iis
-#- puppetlabs-inifile
-#- puppetlabs-java
-#- puppetlabs-java_ks
+# - puppetlabs-inifile
+# - puppetlabs-java
+- puppetlabs-java_ks
 #- puppetlabs-kubernetes
 #- puppetlabs-motd
 #- puppetlabs-mysql
@@ -29,10 +29,10 @@
 #- puppetlabs-postgresql
 #- puppetlabs-powershell
 #- puppetlabs-puppet_conf
-#- puppetlabs-reboot
+- puppetlabs-reboot
 #- puppetlabs-registry
 #- puppetlabs-resource
-#- puppetlabs-rook
+# - puppetlabs-rook
 #- puppetlabs-satellite_pe_tools
 #- puppetlabs-scheduled_task
 #- puppetlabs-service
@@ -44,13 +44,13 @@
 #- puppetlabs-vcsrepo
 #- puppetlabs-websphere_application_server
 #- puppetlabs-windows
-#- puppetlabs-wsus_client
+# - puppetlabs-wsus_client
 ## networking team
 #- cisco_ios
 #- device_manager
 #- puppetlabs-panos
 #- puppetlabs-resource_api
 ## testing only
-- puppetlabs-testing
+# - puppetlabs-testing
 #- puppetlabs-testing1
 #- puppetlabs-testing2
