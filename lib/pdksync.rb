@@ -11,6 +11,9 @@ require 'yaml'
 require 'colorize'
 require 'bundler'
 require 'octokit'
+require 'colorize'
+require 'HTTParty'
+require 'ruby-progressbar'
 
 # @summary
 #   This module set's out and controls the pdksync process
@@ -171,7 +174,6 @@ module PdkSync
       if steps.include?(:create_pr)
         Dir.chdir(main_path) unless Dir.pwd == main_path
         git_instance = Git.open(output_path)
-        if git_instance.diff(git_instance.current_branch, "#{@push_file_destination}/#{@create_pr_against}").size != 0 # Git::Diff doesn't have empty? # rubocop:disable Style/ZeroLengthPredicate
           pdk_version = return_pdk_version("#{output_path}/metadata.json")
 
           # If a label is supplied, verify that it is available in the repo
@@ -197,10 +199,14 @@ module PdkSync
             add_label(client, repo_name, pr.number, label)
             print "added label '#{label}' "
           end
+
         else
           print 'skipped pr, '
         end
+
+        puts pr
       end
+
       if steps.include?(:clean_branches)
         Dir.chdir(main_path) unless Dir.pwd == main_path
         delete_branch(client, repo_name, module_args[:branch_name])
@@ -208,10 +214,68 @@ module PdkSync
       end
       puts 'done.'.green
     end
+
     return if pr_list.size.zero?
     puts "\nPRs created:\n".blue
     pr_list.each do |pr|
       puts pr
+    end
+  end
+
+  def self.analyse_travis_report(url)
+    # puts url
+    # github api: https://api.github.com/repos/puppetlabs/pdksync/pulls/279
+    # pr_url: https://github.com/puppetlabs/puppetlabs-testing/pull/279
+    temp_url = url.split('github.com')
+    pr_url = "https://api.github.com/repos#{temp_url[1]}".sub! 'pull', 'pulls'
+    pr_data = HTTParty.get(pr_url).parsed_response
+    status_data = HTTParty.get(pr_data['statuses_url']).parsed_response
+
+    target_urls = []
+
+    travis_url = ''
+    travis_index = ''
+    status_travis = ''
+    appveyor_url = ''
+    appveyor_index = ''
+    status_appveyor = ''
+
+    # get data from github, get travis, appveyor data
+    # check for status
+    # if pending/running - wait and recheck status
+    status_data.each_index do |index|
+      target_urls.push(status_data[index]['target_url'])
+      target_urls = target_urls.uniq
+      if status_data[index]['target_url'].include?('travis')
+        travis_url = status_data[index]['target_url']
+        travis_index = index if travis_index == ''
+        status_travis = status_data[travis_index]['state']
+      elsif status_data[index]['target_url'].include?('appveyor')
+        appveyor_url = status_data[index]['target_url']
+        appveyor_index = index if appveyor_index == ''
+        status_appveyor = status_data[appveyor_index]['state']
+      end
+    end
+
+    progressbar = ProgressBar.create
+    while status_travis == 'pending' || status_appveyor == 'pending'
+      pr_data = HTTParty.get(pr_url).parsed_response
+      status_data = HTTParty.get(pr_data['statuses_url']).parsed_response
+      status_travis = status_data[travis_index]['state']
+      status_appveyor = status_data[appveyor_index]['state']
+      sleep 180
+      progressbar.increment
+    end
+
+    # disply logs
+    unless travis_url.nil?
+      puts "Failed travis build. Check full log here: #{travis_url}".red if status_travis != 'success'
+      puts 'Successful travis check!'.green if status_travis == 'success'
+    end
+
+    unless appveyor_url.nil?
+      puts "Failed appveyor build. Check full log here: #{appveyor_url}".red if status_appveyor != 'success'
+      puts 'Successful appveyor check!'.green if status_appveyor == 'success'
     end
   end
 
